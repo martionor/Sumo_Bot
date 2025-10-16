@@ -1,0 +1,7 @@
+**/build
+**/.vscode
+**/.devcontainer
+**/.qodo
+**/managed_components
+!/main
+!/main/** 
