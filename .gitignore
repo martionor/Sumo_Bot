@@ -1,0 +1,9 @@
+# Ignore everything
+**/build
+**/.vscode
+**/.devcontainer
+# But allow main folder and its contents
+!/main
+!/main/**
+
+
