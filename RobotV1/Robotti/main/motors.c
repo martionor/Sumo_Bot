@@ -1,104 +1,70 @@
-/* Blink Example
-
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
-*/
-#include <stdio.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include "motor.h"
 #include "driver/gpio.h"
-#include "esp_log.h"
-#include "led_strip.h"
-#include "sdkconfig.h"
 
-static const char *TAG = "example";
+#define SERVO_MIN_US   1000  // full reverse
+#define SERVO_STOP_US  1500  // stop
+#define SERVO_MAX_US   2000  // full forward
 
-/* Use project configuration menu (idf.py menuconfig) to choose the GPIO to blink,
-   or you can edit the following line and set a number here.
-*/
-#define BLINK_GPIO CONFIG_BLINK_GPIO
+#define PWM_FREQUENCY  50    // 50 Hz = standard servo
+#define PWM_RESOLUTION LEDC_TIMER_16_BIT
 
-static uint8_t s_led_state = 0;
+#define LEFT_MOTOR_GPIO   18
+#define RIGHT_MOTOR_GPIO  19
 
-#ifdef CONFIG_BLINK_LED_STRIP
+static const int motor_gpio[2] = {
+    LEFT_MOTOR_GPIO,
+    RIGHT_MOTOR_GPIO
+};
 
-static led_strip_handle_t led_strip;
-
-static void blink_led(void)
+esp_err_t motor_init(void)
 {
-    /* If the addressable LED is enabled */
-    if (s_led_state) {
-        /* Set the LED pixel using RGB from 0 (0%) to 255 (100%) for each color */
-        led_strip_set_pixel(led_strip, 0, 16, 16, 16);
-        /* Refresh the strip to send data */
-        led_strip_refresh(led_strip);
-    } else {
-        /* Set all LED off to clear all pixels */
-        led_strip_clear(led_strip);
+    // Timer config
+    ledc_timer_config_t timer = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = PWM_RESOLUTION,
+        .timer_num = LEDC_TIMER_0,
+        .freq_hz = PWM_FREQUENCY,
+        .clk_cfg = LEDC_AUTO_CLK
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&timer));
+
+    // Channel config for each motor
+    for (int i = 0; i < 2; i++) {
+        ledc_channel_config_t channel = {
+            .gpio_num = motor_gpio[i],
+            .speed_mode = LEDC_LOW_SPEED_MODE,
+            .channel = i,          // channel 0 = left, 1 = right
+            .timer_sel = LEDC_TIMER_0,
+            .duty = 0,
+            .hpoint = 0
+        };
+        ESP_ERROR_CHECK(ledc_channel_config(&channel));
     }
+
+    return ESP_OK;
 }
 
-static void configure_led(void)
+/**
+ * Convert microseconds to LEDC duty
+ */
+static uint32_t us_to_duty(int us)
 {
-    ESP_LOGI(TAG, "Example configured to blink addressable LED!");
-    /* LED strip initialization with the GPIO and pixels number*/
-    led_strip_config_t strip_config = {
-        .strip_gpio_num = BLINK_GPIO,
-        .max_leds = 1, // at least one LED on board
-    };
-#if CONFIG_BLINK_LED_STRIP_BACKEND_RMT
-    led_strip_rmt_config_t rmt_config = {
-        .resolution_hz = 10 * 1000 * 1000, // 10MHz
-        .flags.with_dma = false,
-    };
-    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip));
-#elif CONFIG_BLINK_LED_STRIP_BACKEND_SPI
-    led_strip_spi_config_t spi_config = {
-        .spi_bus = SPI2_HOST,
-        .flags.with_dma = true,
-    };
-    ESP_ERROR_CHECK(led_strip_new_spi_device(&strip_config, &spi_config, &led_strip));
-#else
-#error "unsupported LED strip backend"
-#endif
-    /* Set all LED off to clear all pixels */
-    led_strip_clear(led_strip);
+    const int max_duty = (1 << PWM_RESOLUTION) - 1;
+    const float period_us = 1e6f / PWM_FREQUENCY;
+    return (uint32_t)((us / period_us) * max_duty);
 }
 
-#elif CONFIG_BLINK_LED_GPIO
-
-static void blink_led(void)
+esp_err_t motor_set_speed(motor_id_t motor, int speed)
 {
-    /* Set the GPIO level according to the state (LOW or HIGH)*/
-    gpio_set_level(BLINK_GPIO, s_led_state);
-}
+    if (motor < 0 || motor > 1) return ESP_ERR_INVALID_ARG;
+    if (speed < -100) speed = -100;
+    if (speed > 100) speed = 100;
 
-static void configure_led(void)
-{
-    ESP_LOGI(TAG, "Example configured to blink GPIO LED!");
-    gpio_reset_pin(BLINK_GPIO);
-    /* Set the GPIO as a push/pull output */
-    gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
-}
+    // map -100..100 → 1000..2000 us
+    int pulse = SERVO_STOP_US + (SERVO_MAX_US - SERVO_STOP_US) * speed / 100;
 
-#else
-#error "unsupported LED type"
-#endif
+    uint32_t duty = us_to_duty(pulse);
 
-void app_main(void)
-{
-
-    /* Configure the peripheral according to the LED type */
-    configure_led();
-
-    while (1) {
-        ESP_LOGI(TAG, "Turning the LED %s!", s_led_state == true ? "ON" : "OFF");
-        blink_led();
-        /* Toggle the LED state */
-        s_led_state = !s_led_state;
-        vTaskDelay(CONFIG_BLINK_PERIOD / portTICK_PERIOD_MS);
-    }
+    return ledc_set_duty(LEDC_LOW_SPEED_MODE, motor, duty) |
+           ledc_update_duty(LEDC_LOW_SPEED_MODE, motor);
 }
